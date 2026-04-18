@@ -1,0 +1,4 @@
+[tool.pytest.ini_options]
+markers = [
+    "integration: tests that hit real external APIs (deselect with '-m not integration')",
+]
