@@ -23,21 +23,46 @@ def _members_path():
     return Path(__file__).parent.parent / "seeds" / "member.csv"
 
 
-def _load_members():
-    """Load member.csv as a lookup dict: name -> {party, gender}."""
+def _load_members(parliament=None):
+    """Load member.csv as a lookup dict: name -> {party, gender}.
+
+    If parliament number is given, filter to that parliament term.
+    This handles MPs who changed party between terms (e.g. NMP -> PAP).
+    Falls back to the most recent entry if no parliament match found.
+    """
     members_file = _members_path()
     if not members_file.exists():
         return {}
     df = pd.read_csv(members_file)
-    return {
-        row["mp_name"]: {"party": row["party"], "gender": row["gender"]}
-        for _, row in df.iterrows()
-    }
+
+    if parliament and "parliament" in df.columns:
+        # Filter to matching parliament, fall back to latest entry
+        result = {}
+        for name in df["mp_name"].unique():
+            mp_rows = df[df["mp_name"] == name]
+            match = mp_rows[mp_rows["parliament"] == parliament]
+            if len(match):
+                row = match.iloc[0]
+            else:
+                row = mp_rows.sort_values("parliament").iloc[-1]
+            result[name] = {"party": row["party"], "gender": row["gender"]}
+        return result
+    else:
+        # No parliament filter — use latest entry per MP
+        result = {}
+        for _, row in df.iterrows():
+            result[row["mp_name"]] = {"party": row["party"], "gender": row["gender"]}
+        return result
 
 
 def _enrich_with_members(dataframes):
     """Add party and gender columns to attendance and speeches DataFrames."""
-    members = _load_members()
+    # Get parliament number from sittings data
+    parliament = None
+    if "sittings" in dataframes and len(dataframes["sittings"]):
+        parliament = int(dataframes["sittings"]["parliament"].iloc[0])
+
+    members = _load_members(parliament=parliament)
     if not members:
         return dataframes
 
