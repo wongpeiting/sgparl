@@ -2,7 +2,7 @@
 
 A CLI tool for pulling Singapore Parliament Hansard data into structured CSV/JSON files — built for those who want to work with parliamentary speech data without wading through the Hansard website or setting up cloud infrastructure.
 
-## What is this for
+## What this is for
 
 Singapore's Parliament publishes Hansard transcripts online, but they're not easy to work with at scale. If you want to know what a minister said about housing across 20 sittings, or compare how much airtime different MPs get on a topic, you're stuck clicking through pages one by one.
 
