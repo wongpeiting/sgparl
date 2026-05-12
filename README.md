@@ -1,4 +1,4 @@
-# Singapore Parliament Hansard data from the command line
+# Singapore Parliament from the command line
 
 A CLI tool for pulling Singapore Parliament Hansard data into structured CSV/JSON files — built for those who want to work with parliamentary speech data without wading through the Hansard website or setting up cloud infrastructure.
 
