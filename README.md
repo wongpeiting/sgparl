@@ -130,7 +130,7 @@ Both tracks call the same API endpoint (`getHansardReport/?sittingDate=`) but pa
             Post-2012 dates                          Pre-2012 dates
             (Version 2, 414 dates)                   (Version 1, 1,333 dates)
                   |                                         |
-        python -m sgparl                     python scrape_pre2012_v2.py
+        python -m sgparl                     python -m sgparl.pre2012
                   |                                         |
     getHansardReport returns:                getHansardReport returns:
     - metadata (JSON)                        - htmlFullContent (raw HTML)
@@ -138,7 +138,7 @@ Both tracks call the same API endpoint (`getHansardReport/?sittingDate=`) but pa
     - takesSectionVOList (JSON array)          concatenated <html> blocks,
       with per-topic content HTML              plus PRESENT/ABSENT attendance
                   |                                         |
-    sgparl/parse.py                          scrape_pre2012_v2.py
+    sgparl/parse.py                          sgparl/pre2012.py
     (structured JSON parser)                 (HTML parser)
                   |                                         |
     data/all/                                data/all/pre2012_v2/
@@ -149,7 +149,7 @@ Both tracks call the same API endpoint (`getHansardReport/?sittingDate=`) but pa
                   |                                         |
                   +--------------------+--------------------+
                                        |
-                              python reparse_names.py --all
+                              python -m sgparl.reparse --all
                               (shared post-processing)
                                        |
                               +--------+--------+
@@ -191,7 +191,7 @@ After scraping, both tracks go through the same cleaning:
 Then merge and re-enrich:
 
 ```
-python reparse_names.py --all
+python -m sgparl.reparse --all
   -> re-applies get_mp_name + resolve_role_titles
   -> outputs speeches_all.csv, topics_all.csv
 ```
@@ -233,11 +233,11 @@ Role-title resolution (`sgparl/enrich.py`) additionally maps:
 
 - All dates use `YYYY-MM-DD` format.
 - **`--from`/`--to` date ranges rely on `seeds/dates.csv`.** Run `--update-seeds` to bring it up to date.
-- **Pre-2012 HTML uses a different format** (inline `<b>` tags rather than `<p><strong>` blocks). After multi-speaker splitting, orphan stitching, and HTML refetch recovery, only 0.03% of total words remain unrecoverable — mostly Ministry Addenda, Budget section headers, and fragments from topics where the API search limit prevented finding the original HTML.
+- **Pre-2012 HTML uses a different format** (inline `<b>` tags rather than `<p><strong>` blocks). After multi-speaker splitting, orphan stitching, and HTML refetch recovery, only 0.03% of total words remain unrecoverable — mostly Ministry Addenda, Budget section headers, and short fragments.
 - **Attendance is corrected using speech data.** The Hansard attendance list is a roll call at the start of the sitting. Ministers who arrive late are marked absent even if they speak later — 22% of all "absent" records are contradicted by speech data. The scraper overrides `is_present` to `True` for any MP who spoke that day.
 - **Deputy Speaker chairing speeches are flagged.** When an MP chairs proceedings as Deputy Speaker, Hansard records their procedural utterances under their personal name with a `[Deputy Speaker (Mr X) in the Chair]` tag. These are flagged with `is_chairing = True`. Without this, Christopher de Souza's word count is inflated by 42K words (15%), Charles Chong's by 53K (76%).
 - **"The Chairman" speeches are flagged but not name-resolved.** During Committee of Supply debates, "The Chairman" is whoever is chairing — typically the Deputy Speaker or an appointed MP, NOT the Speaker of Parliament. These are flagged `is_chairing = True` and `is_appointment = True` but `member_name` is left empty because the role rotates and we lack per-sitting chair data.
-- **Colons are stripped from speech text.** The upstream parsing replaces all colons with spaces ("1:20" becomes "1 20").
+- **Only leading colons are stripped from speech text.** The colon after a speaker's name (the separator) is removed, but colons within the text content (times like "1:20 pm", ratios) are preserved.
 - **Anonymous interjections are flagged as noise.** "An hon. Member", "Some hon. Members" = unidentified shouts from the chamber. "ADJOURNMENT", "(Motion)", "ANNUAL BUDGET STATEMENT" = procedural markers. These are flagged with `is_noise = True`. Filter with `speeches[~speeches['is_noise']]`.
 - **Multi-speaker blocks are split and stitched.** The pre-2012 HTML parser often lumped entire debates into a single row. These are detected by finding 2+ inline speaker patterns (e.g. "Mr Foo (West Coast):") in the text, then split into individual speeches. Split speech IDs use a `-SPLIT-{N}` suffix. Orphan text fragments produced by imperfect splitting (where the regex cut at a quoted reference like "The Prime Minister said..." rather than a new speaker) are stitched back to the previous speaker — 98,311 fragments (13M words) recovered this way.
 - **Pre-2012 data uses full HTML content.** The `pre2012` scraper bypasses the API's broken search pagination by using the `htmlFullContent` endpoint, which returns the complete sitting report as raw HTML. This provides full coverage including all topics per sitting.
