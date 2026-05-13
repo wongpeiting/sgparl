@@ -187,12 +187,13 @@ After scraping, both tracks go through the same cleaning:
 6. Section type      -> Normalise pre-2012 codes (OR->OA, WR->WA, etc.)
    normalisation        via section_type_normalised column
 ```
-                                         |
-                                python reparse_names.py
-                                (re-applies get_mp_name + resolve_role_titles)
-                                         |
-                                  speeches_all.csv
-                                  topics_all.csv
+
+Then merge and re-enrich:
+
+```
+python reparse_names.py --all
+  -> re-applies get_mp_name + resolve_role_titles
+  -> outputs speeches_all.csv, topics_all.csv
 ```
 
 ## Key modules
