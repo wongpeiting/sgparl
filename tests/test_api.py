@@ -1,12 +1,14 @@
 # tests/test_api.py
-import json
-from pathlib import Path
-from unittest.mock import patch, Mock
+from unittest.mock import patch
 
-from sgparl.api import fetch, _to_ddmmyyyy, NoSittingError
-
-
-FIXTURES = Path(__file__).parent / "fixtures"
+from sgparl.api import (
+    fetch,
+    check_sitting,
+    _to_ddmmyyyy,
+    _solr_daterange,
+    _section_type,
+    NoSittingError,
+)
 
 
 class TestDateConversion:
@@ -16,44 +18,73 @@ class TestDateConversion:
     def test_converts_different_date(self):
         assert _to_ddmmyyyy("1955-04-22") == "22-04-1955"
 
+    def test_solr_daterange_wraps_a_single_day(self):
+        assert _solr_daterange("2020-01-06") == (
+            "2020-01-06T00:00:00Z TO 2020-01-06T23:59:59Z"
+        )
+
+
+class TestSectionType:
+    def test_maps_known_prefixes(self):
+        assert _section_type("oral-answer-2101#") == "OA"
+        assert _section_type("written-answer-5477#") == "WA"
+        assert _section_type("written-answer-na-5494#") == "WANA"
+        assert _section_type("bill-753#") == "BI"
+        assert _section_type("bill-intro-367#") == "BI"
+
+    def test_unknown_prefix_falls_back_to_os(self):
+        assert _section_type("motion-1257#") == "OS"
+        assert _section_type("matter-adj-2656#") == "OS"
+
+
+def _fake_post(endpoint, payload):
+    """Stand-in for api._post: one report, one speech."""
+    if endpoint == "searchResult":
+        return [{
+            "reportId": "bill-1#",
+            "maxResult": "1",
+            "title": "Test Bill",
+            "sittingDate": "7-5-2024",
+        }]
+    if endpoint == "getHansardTopic":
+        return {"resultHTML": {
+            "content": "<p><strong>Mr Test Speaker (Ang Mo Kio)</strong>: Hello world.</p>",
+            "title": "Test Bill",
+            "parlNo": "14", "sessionNo": "1", "volumeNo": "95", "sittingNo": "1",
+            "sittingDate": "7-5-2024",
+        }}
+    return None
+
 
 class TestFetch:
-    def test_returns_parsed_json(self):
-        sample = json.loads((FIXTURES / "sample_response.json").read_text())
-        mock_resp = Mock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = sample
-
-        with patch("sgparl.api.requests.get", return_value=mock_resp) as mock_get:
+    def test_returns_old_shape_from_new_endpoints(self):
+        with patch("sgparl.api._post", side_effect=_fake_post):
             result = fetch("2024-05-07")
 
-        mock_get.assert_called_once_with(
-            "https://sprs.parl.gov.sg/search/getHansardReport/?sittingDate=07-05-2024",
-            timeout=30,
-        )
-        assert "metadata" in result
-        assert "takesSectionVOList" in result
+        assert set(result) == {"metadata", "attendanceList", "takesSectionVOList"}
+        assert result["metadata"]["parlimentNO"] == "14"
+        assert result["metadata"]["sittingDate"] == "07-05-2024"
+        # Attendance is not exposed by the sprs3 API -> empty, best-effort.
+        assert result["attendanceList"] == []
+        assert len(result["takesSectionVOList"]) == 1
+        topic = result["takesSectionVOList"][0]
+        assert topic["sectionType"] == "BI"
+        assert "<strong>" in topic["content"]
 
-    def test_raises_on_non_200(self):
-        mock_resp = Mock()
-        mock_resp.status_code = 500
-        mock_resp.raise_for_status.side_effect = Exception("Server Error")
-
-        with patch("sgparl.api.requests.get", return_value=mock_resp):
-            try:
-                fetch("2024-05-07")
-                assert False, "Should have raised"
-            except Exception:
-                pass
-
-    def test_raises_no_sitting_on_empty_response(self):
-        mock_resp = Mock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {}
-
-        with patch("sgparl.api.requests.get", return_value=mock_resp):
+    def test_raises_no_sitting_when_no_reports(self):
+        with patch("sgparl.api._post", return_value={}):
             try:
                 fetch("2024-01-01")
                 assert False, "Should have raised NoSittingError"
             except NoSittingError:
                 pass
+
+
+class TestCheckSitting:
+    def test_true_when_reports_exist(self):
+        with patch("sgparl.api._post", side_effect=_fake_post):
+            assert check_sitting("2024-05-07") is True
+
+    def test_false_on_error(self):
+        with patch("sgparl.api._post", side_effect=RuntimeError("boom")):
+            assert check_sitting("2024-05-07") is False

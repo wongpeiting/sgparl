@@ -23,10 +23,18 @@ def parse_sittings(metadata):
     date_object = datetime.strptime(date_string, "%d-%m-%Y")
     date_str = date_object.strftime("%Y-%m-%d")
 
-    datetime_string = f"{date_string} {metadata['startTimeStr']}"
-    datetime_string = datetime_string.replace("noon", "PM")
-    datetime_object = datetime.strptime(datetime_string, "%d-%m-%Y %I:%M %p")
-    datetime_str = datetime_object.strftime("%Y-%m-%dT%H:%M:%S")
+    # The sprs3 API does not expose the sitting start time. When it's missing,
+    # leave datetime blank rather than fabricate one (duration stays blank too).
+    start_time = (metadata.get("startTimeStr") or "").strip()
+    if start_time:
+        datetime_string = f"{date_string} {start_time}".replace("noon", "PM")
+        try:
+            datetime_object = datetime.strptime(datetime_string, "%d-%m-%Y %I:%M %p")
+            datetime_str = datetime_object.strftime("%Y-%m-%dT%H:%M:%S")
+        except ValueError:
+            datetime_str = ""
+    else:
+        datetime_str = ""
 
     return pd.DataFrame(
         {
