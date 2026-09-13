@@ -16,8 +16,8 @@ Run the scraper on a sitting date and you get four CSV files:
 |------|-------------|
 | `speeches.csv` | Every speech paragraph — who said it, party, gender, what they said, word/syllable/sentence counts, chairing flag, appointment flag, noise flag |
 | `topics.csv` | What was discussed — oral answers (OA), bills (BI), motions (MO), etc. |
-| `attendance.csv` | Which MPs showed up and which didn't, with party and gender. Corrected using speech data. |
-| `sittings.csv` | Sitting metadata — parliament number, session, start/end time, duration |
+| `attendance.csv` | Which MPs showed up and which didn't, with party and gender. Corrected using speech data. *(Pre-2012 only — the post-2012 API no longer exposes the roll call, so this is empty for post-2012 sittings.)* |
+| `sittings.csv` | Sitting metadata — parliament number, session, volume, sitting number. *(Post-2012 `datetime`/`duration_hours` are blank: the current API doesn't expose the sitting start time.)* |
 
 The scraper cleans up the raw Hansard HTML: it identifies speakers, strips procedural boilerplate, standardises MP names (so "The Minister for Health (Mr Ong Ye Kung)" becomes "Ong Ye Kung"), and merges consecutive paragraphs from the same speaker into single entries.
 
@@ -63,6 +63,10 @@ python -m sgparl --date 2024-05-07 2024-02-05
 # Date range (uses seeds/dates.csv for known sitting dates)
 python -m sgparl --from 2024-01-01 --to 2024-03-31
 
+# Faster large scrapes: download a sitting's reports in parallel
+# (4-6 workers is a good, polite range)
+python -m sgparl --from 2012-09-01 --to 2026-12-31 --workers 5
+
 # Save to a specific folder (default: data/)
 python -m sgparl --date 2024-05-07 --output my-data/
 
@@ -75,6 +79,11 @@ python -m sgparl --update-seeds
 ```
 
 When scraping multiple dates, all results are combined into a single set of files.
+
+**Scrapes are resumable.** Each sitting is written to the output CSVs as soon as
+it's parsed, and re-running the same command skips dates already present — so an
+interrupted multi-hour scrape picks up where it left off. Pass `--fresh` to wipe
+the output and start over.
 
 ### Re-parsing names (no rescraping needed)
 
@@ -103,7 +112,32 @@ python -m sgparl.pre2012
 
 This uses the same `getHansardReport` endpoint, but parses the `htmlFullContent` field (raw HTML of the full sitting report) instead of the structured JSON that post-2012 returns. Uses HTML comments (`<!-- MP_NAME:Name -->`) as the primary speaker source, with bold tags as fallback. Outputs to `data/all/pre2012_v2/`. Takes ~5 hours for all 1,333 dates. Checkpoints every 20 dates.
 
-**Why a separate scraper?** The Parliament API uses the same endpoint for all dates, but the response format changed in September 2012. Post-2012 returns structured JSON (`metadata`, `attendanceList`, `takesSectionVOList`). Pre-2012 returns a single `htmlFullContent` field containing the entire sitting as concatenated HTML blocks. The parsers are different because the data format is different.
+**Why a separate scraper?** Historically both eras were served by the same
+`getHansardReport` endpoint in different formats (structured JSON post-2012, a
+single `htmlFullContent` HTML blob pre-2012). Parliament has since retired that
+endpoint for the current portal — the post-2012 track now uses the sprs3 POST
+endpoints (see below), while the pre-2012 track still relies on
+`getHansardReport/htmlFullContent`. Different data formats, different parsers.
+
+### The sprs3 API (post-2012)
+
+Parliament rebuilt the Hansard site as a single-page app and retired the old
+`GET /search/getHansardReport` endpoint — it now returns **HTTP 500 for every
+date**. The post-2012 scraper was rewired onto the endpoints the live site uses:
+
+- **`POST /search/searchResult`** — enumerate the reports for a sitting, filtered
+  by a Solr day-range. The endpoint is load-balanced across two backend nodes
+  that report slightly different totals, so `sgparl` probes the count, then
+  sweeps and dedupes by `reportId` until the full set is collected.
+- **`POST /search/getHansardTopic`** — fetch one report's HTML content, which the
+  existing parser already understands.
+
+`fetch(date)` stitches these back into the old `{metadata, attendanceList,
+takesSectionVOList}` shape, so the rest of the pipeline is unchanged. Two fields
+the old date-level report carried are **not** exposed by the new API: the
+roll-call attendance list (so `attendance.csv` is empty post-2012) and the
+sitting start time (so `sittings.csv` `datetime`/`duration_hours` are blank).
+Speeches, topics, names, party/gender and text metrics are fully recovered.
 
 ### Keeping sitting dates up to date
 
@@ -119,7 +153,8 @@ This scans every weekday from the last known date to today, checks the API, and 
 
 ### Two-track scraper
 
-Both tracks call the same API endpoint (`getHansardReport/?sittingDate=`) but parse different response formats:
+The two tracks now call **different** endpoints (Parliament retired the shared
+one — see the sprs3 note below):
 
 ```
                                 seeds/dates.csv
@@ -132,11 +167,13 @@ Both tracks call the same API endpoint (`getHansardReport/?sittingDate=`) but pa
                   |                                         |
         python -m sgparl                     python -m sgparl.pre2012
                   |                                         |
-    getHansardReport returns:                getHansardReport returns:
-    - metadata (JSON)                        - htmlFullContent (raw HTML)
-    - attendanceList (JSON array)              Contains ALL topics as
-    - takesSectionVOList (JSON array)          concatenated <html> blocks,
-      with per-topic content HTML              plus PRESENT/ABSENT attendance
+    sprs3 POST endpoints:                    getHansardReport returns:
+    - searchResult: list a day's             - htmlFullContent (raw HTML)
+      reports (dedup across nodes)             Contains ALL topics as
+    - getHansardTopic: each report's           concatenated <html> blocks,
+      content HTML                             plus PRESENT/ABSENT attendance
+      (fetch() rebuilds the old
+       metadata/topics shape)
                   |                                         |
     sgparl/parse.py                          sgparl/pre2012.py
     (structured JSON parser)                 (HTML parser)
@@ -200,7 +237,7 @@ python -m sgparl.reparse --all
 
 | File | Purpose |
 |------|---------|
-| `sgparl/api.py` | API client — fetches Hansard reports from sprs.parl.gov.sg |
+| `sgparl/api.py` | sprs3 API client — enumerates a sitting's reports (`searchResult`) and fetches each report's content (`getHansardTopic`), then rebuilds the legacy per-sitting shape for the parser |
 | `sgparl/parse.py` | Parses API responses into DataFrames (sittings, attendance, topics, speeches) |
 | `sgparl/utils.py` | Name cleaning (`get_mp_name`), syllable counting, text metrics |
 | `sgparl/enrich.py` | Post-processing: resolves role titles to names by date, flags appointment-capacity speeches |
@@ -234,7 +271,7 @@ Role-title resolution (`sgparl/enrich.py`) additionally maps:
 - All dates use `YYYY-MM-DD` format.
 - **`--from`/`--to` date ranges rely on `seeds/dates.csv`.** Run `--update-seeds` to bring it up to date.
 - **Pre-2012 HTML uses a different format** (inline `<b>` tags rather than `<p><strong>` blocks). After multi-speaker splitting, orphan stitching, and HTML refetch recovery, only 0.03% of total words remain unrecoverable — mostly Ministry Addenda, Budget section headers, and short fragments.
-- **Attendance is corrected using speech data.** The Hansard attendance list is a roll call at the start of the sitting. Ministers who arrive late are marked absent even if they speak later — 22% of all "absent" records are contradicted by speech data. The scraper overrides `is_present` to `True` for any MP who spoke that day.
+- **Attendance is corrected using speech data (pre-2012).** Where an attendance roll call is available, ministers who arrive late are marked absent even if they speak later — 22% of all "absent" records are contradicted by speech data. The scraper overrides `is_present` to `True` for any MP who spoke that day. *Note: the post-2012 sprs3 API no longer exposes the roll call, so `attendance.csv` is empty for post-2012 sittings.*
 - **Deputy Speaker chairing speeches are flagged.** When an MP chairs proceedings as Deputy Speaker, Hansard records their procedural utterances under their personal name with a `[Deputy Speaker (Mr X) in the Chair]` tag. These are flagged with `is_chairing = True`. Without this, Christopher de Souza's word count is inflated by 42K words (15%), Charles Chong's by 53K (76%).
 - **"The Chairman" speeches are flagged but not name-resolved.** During Committee of Supply debates, "The Chairman" is whoever is chairing — typically the Deputy Speaker or an appointed MP, NOT the Speaker of Parliament. These are flagged `is_chairing = True` and `is_appointment = True` but `member_name` is left empty because the role rotates and we lack per-sitting chair data.
 - **Only leading colons are stripped from speech text.** The colon after a speaker's name (the separator) is removed, but colons within the text content (times like "1:20 pm", ratios) are preserved.
