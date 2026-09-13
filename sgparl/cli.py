@@ -9,6 +9,7 @@ import pandas as pd
 
 from datetime import datetime, timedelta
 
+from sgparl import api
 from sgparl.api import fetch, check_sitting, NoSittingError
 from sgparl.enrich import resolve_role_titles
 from sgparl.parse import parse_sittings, parse_attendance, parse_topics, parse_speeches, extract_adjournment_time
@@ -212,6 +213,63 @@ def save_output(dataframes, output_dir, fmt):
             print(f"  Saved {path} ({len(df)} rows)")
 
 
+def append_csv(dataframes, output_dir):
+    """Append each DataFrame to its CSV, writing the header only for new files.
+
+    This makes long, multi-date scrapes crash-safe and resumable: each sitting's
+    rows land on disk as soon as it's parsed, so an interruption loses at most
+    the date in flight.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    for name, df in dataframes.items():
+        path = os.path.join(output_dir, f"{name}.csv")
+        header = not os.path.exists(path)
+        df.to_csv(path, mode="a", header=header, index=False)
+
+
+def _already_scraped_dates(output_dir):
+    """Dates already present in an existing speeches.csv (for --resume)."""
+    path = os.path.join(output_dir, "speeches.csv")
+    if not os.path.exists(path):
+        return set()
+    try:
+        return set(pd.read_csv(path, usecols=["date"])["date"].astype(str).unique())
+    except Exception:
+        return set()
+
+
+def _process_one_date(date):
+    """Fetch, parse and enrich a single sitting. Returns a dict of DataFrames,
+    or None if the date has no sitting."""
+    data = fetch(date)
+    print(f"  [{date}] Parsing...")
+
+    sitting_df = parse_sittings(data["metadata"])
+    end_time = extract_adjournment_time(date, data["takesSectionVOList"])
+    sitting_df["end_time"] = end_time or ""
+    if end_time and sitting_df["datetime"].iloc[0]:
+        try:
+            start = datetime.strptime(sitting_df["datetime"].iloc[0], "%Y-%m-%dT%H:%M:%S")
+            end_dt = datetime.strptime(f"{date} {end_time}", "%Y-%m-%d %I:%M %p")
+            sitting_df["duration_hours"] = round((end_dt - start).total_seconds() / 3600, 2)
+        except ValueError:
+            sitting_df["duration_hours"] = ""
+    else:
+        sitting_df["duration_hours"] = ""
+
+    dfs = {
+        "sittings": sitting_df,
+        "attendance": parse_attendance(date, data["attendanceList"]),
+        "topics": parse_topics(date, data["takesSectionVOList"]),
+        "speeches": parse_speeches(date, data["takesSectionVOList"]),
+    }
+
+    dfs = _enrich_with_members(dfs)
+    dfs["speeches"] = resolve_role_titles(dfs["speeches"])
+    dfs = _correct_attendance(dfs)
+    return dfs
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="sgparl",
@@ -230,6 +288,16 @@ def main():
         "--output", default="data", help="Output directory (default: data)"
     )
     parser.add_argument(
+        "--fresh", action="store_true",
+        help="Delete existing output and re-scrape from scratch "
+             "(default: resume, skipping dates already scraped)",
+    )
+    parser.add_argument(
+        "--workers", type=int, default=1,
+        help="Parallel report-content downloads per sitting (default: 1). "
+             "Use 4-6 to speed up large scrapes; higher loads the API more.",
+    )
+    parser.add_argument(
         "--format",
         dest="fmt",
         choices=["csv", "json", "both"],
@@ -241,6 +309,9 @@ def main():
     if args.update_seeds:
         update_seeds()
         return
+
+    if args.workers and args.workers > 1:
+        api.WORKERS = args.workers
 
     if not args.date and not (args.date_from and args.date_to):
         parser.error("Provide --date or both --from and --to")
@@ -256,60 +327,54 @@ def main():
         print("No sitting dates found for the given range.")
         sys.exit(0)
 
-    print(f"Scraping {len(dates)} date(s): {', '.join(dates)}")
+    # Resumable by default: skip dates already present in the output. Each date
+    # is written to disk as it completes, so an interrupted multi-hour scrape can
+    # be re-run and picks up where it left off. Pass --fresh to start over.
+    if args.fresh:
+        for name in ("sittings", "attendance", "topics", "speeches"):
+            for ext in ("csv", "json"):
+                p = os.path.join(args.output, f"{name}.{ext}")
+                if os.path.exists(p):
+                    os.remove(p)
 
-    all_sittings = []
-    all_attendance = []
-    all_topics = []
-    all_speeches = []
+    done = _already_scraped_dates(args.output)
+    todo = [d for d in dates if d not in done]
+    if done:
+        print(f"Resuming: {len(done)} date(s) already scraped, {len(todo)} to go.")
+    print(f"Scraping {len(todo)} date(s)"
+          + (f": {', '.join(todo)}" if len(todo) <= 12 else f" ({todo[0]} ... {todo[-1]})"))
 
-    for date in dates:
+    scraped = 0
+    for date in todo:
         try:
-            data = fetch(date)
-            print(f"  [{date}] Parsing...")
-
-            sitting_df = parse_sittings(data["metadata"])
-            end_time = extract_adjournment_time(date, data["takesSectionVOList"])
-            sitting_df["end_time"] = end_time or ""
-            if end_time and sitting_df["datetime"].iloc[0]:
-                try:
-                    start = datetime.strptime(sitting_df["datetime"].iloc[0], "%Y-%m-%dT%H:%M:%S")
-                    end_dt = datetime.strptime(f"{date} {end_time}", "%Y-%m-%d %I:%M %p")
-                    duration = (end_dt - start).total_seconds() / 3600
-                    sitting_df["duration_hours"] = round(duration, 2)
-                except ValueError:
-                    sitting_df["duration_hours"] = ""
-            else:
-                sitting_df["duration_hours"] = ""
-
-            all_sittings.append(sitting_df)
-            all_attendance.append(parse_attendance(date, data["attendanceList"]))
-            all_topics.append(parse_topics(date, data["takesSectionVOList"]))
-            all_speeches.append(parse_speeches(date, data["takesSectionVOList"]))
-
-            print(f"  [{date}] Done")
-
+            dfs = _process_one_date(date)
+            append_csv(dfs, args.output)
+            scraped += 1
+            print(f"  [{date}] Done "
+                  f"({len(dfs['speeches'])} speeches, {len(dfs['topics'])} topics)")
         except NoSittingError:
             print(f"  [{date}] No sitting found, skipping")
         except Exception as e:
-            print(f"  [{date}] Error: {e}")
+            print(f"  [{date}] Error: {e} -- will retry on next run")
 
-    if not all_sittings:
+    if scraped == 0 and not done:
         print("No data scraped.")
         sys.exit(0)
 
-    output = {
-        "sittings": pd.concat(all_sittings, ignore_index=True),
-        "attendance": pd.concat(all_attendance, ignore_index=True),
-        "topics": pd.concat(all_topics, ignore_index=True),
-        "speeches": pd.concat(all_speeches, ignore_index=True),
-    }
+    # CSVs are the source of truth (written incrementally). If JSON was asked
+    # for, regenerate it once at the end from the complete CSVs.
+    if args.fmt in ("json", "both"):
+        print("\nWriting JSON output from CSVs...")
+        for name in ("sittings", "attendance", "topics", "speeches"):
+            csv_path = os.path.join(args.output, f"{name}.csv")
+            if os.path.exists(csv_path):
+                df = pd.read_csv(csv_path)
+                with open(os.path.join(args.output, f"{name}.json"), "w") as f:
+                    json.dump(df.to_dict(orient="records"), f, indent=2)
+        if args.fmt == "json":
+            for name in ("sittings", "attendance", "topics", "speeches"):
+                p = os.path.join(args.output, f"{name}.csv")
+                if os.path.exists(p):
+                    os.remove(p)
 
-    output = _enrich_with_members(output)
-    if "speeches" in output:
-        output["speeches"] = resolve_role_titles(output["speeches"])
-    output = _correct_attendance(output)
-
-    print(f"\nSaving to {args.output}/")
-    save_output(output, args.output, args.fmt)
-    print("Done!")
+    print(f"\nDone! Output in {args.output}/")

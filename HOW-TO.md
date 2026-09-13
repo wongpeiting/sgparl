@@ -32,6 +32,20 @@ This checks every weekday from the last known sitting to today against the Parli
 
 ## Scraping speeches
 
+> **API migration note (sprs3).** Parliament retired the old
+> `getHansardReport` endpoint the main scraper used to call — it now returns
+> HTTP 500 for every date. The scraper was rewritten against the current sprs3
+> POST endpoints (`searchResult` to list a sitting's reports, `getHansardTopic`
+> to fetch each report's text). Two knock-on effects for post-2012 data:
+>
+> - **`attendance.csv` is empty** — the roll-call attendance list is no longer
+>   exposed by the API. (Speeches, topics and sittings are unaffected.)
+> - **`sittings.csv` has no `datetime`/`duration_hours`** — the sitting start
+>   time is not exposed either, so these are left blank.
+>
+> Everything that matters for speech analysis — who said what, party, gender,
+> word/sentence counts — is fully recovered.
+
 ### Post-2012 sittings (main scraper)
 
 You need to know the date Parliament sat. Dates are always in `YYYY-MM-DD` format.
@@ -45,6 +59,13 @@ python -m sgparl --date 2026-04-07 2026-04-08
 
 # Date range (auto-skips non-sitting days)
 python -m sgparl --from 2026-01-01 --to 2026-04-18
+
+# Faster: download reports in parallel (4-6 is a good, polite range)
+python -m sgparl --from 2012-09-01 --to 2026-12-31 --workers 5
+
+# Resumable by default — re-running skips dates already in the output.
+# Use --fresh to wipe the output and start over.
+python -m sgparl --from 2012-09-01 --to 2026-12-31 --workers 5 --fresh
 
 # Save to a different folder
 python -m sgparl --date 2026-04-08 --output my-folder/
