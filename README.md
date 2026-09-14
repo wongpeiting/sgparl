@@ -139,6 +139,31 @@ roll-call attendance list (so `attendance.csv` is empty post-2012) and the
 sitting start time (so `sittings.csv` `datetime`/`duration_hours` are blank).
 Speeches, topics, names, party/gender and text metrics are fully recovered.
 
+### Known limitations (open)
+
+**Post-2012 attendance and sitting start time are not available.** These are a
+consequence of the sprs3 migration above, not a scrape bug, and remain open:
+
+- **`attendance.csv` is empty for post-2012 sittings.** The roll call (present/
+  absent per MP) is not served by `searchResult` or `getHansardTopic` — the
+  `attendanceList`/`atbpList`/`ptbaList` fields come back empty.
+- **`sittings.csv` `datetime` (start time) and `duration_hours` are blank.** The
+  API doesn't publish when the House convened. The `end_time` *is* recovered (from
+  the "Adjourned accordingly at…" line), as are parliament/session/volume/sitting
+  numbers — only the start, and therefore the duration, is missing. The start time
+  can't be reliably read from the transcript either: the `<h6>` clock-marks only
+  appear inside some debate reports, not Question Time, so the earliest mark is a
+  debate timestamp, not the convening time (e.g. 6 Jan 2020's earliest mark is
+  3:16 PM, though the House sat well before that).
+
+**Intended fix:** backfill both from Parliament's **Votes & Proceedings** pages
+(`parliament.gov.sg/parliamentary-business/votes-and-proceedings`), which publish
+per-sitting attendance and convening times independently of the Hansard API —
+best as a small standalone module (e.g. `sgparl/votes_proceedings.py`) that
+enriches `attendance.csv` and the `datetime`/`duration_hours` columns without
+touching the Hansard scrape. Analyses that rely only on `speeches.csv` are
+unaffected.
+
 ### Keeping sitting dates up to date
 
 `--from`/`--to` uses `seeds/dates.csv` (a list of known sitting dates going back to 1955) to figure out which days Parliament actually sat. To bring this list up to date:
