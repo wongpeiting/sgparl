@@ -1,0 +1,51 @@
+name: Update sitting-date seeds
+
+# Keeps seeds/dates.csv current by scanning the Parliament API for new sitting
+# dates and committing any it finds. Runs on a schedule (~fortnightly) and can
+# also be triggered by hand from the Actions tab.
+on:
+  schedule:
+    # Cron has no true "every 14 days", so run on the 1st and 15th of each month
+    # (00:30 UTC) — roughly fortnightly.
+    - cron: '30 0 1,15 * *'
+  workflow_dispatch: {}
+
+# Allow the job to push the refreshed seeds file back to the repo.
+permissions:
+  contents: write
+
+# Don't let two runs push at once.
+concurrency:
+  group: update-seeds
+  cancel-in-progress: false
+
+jobs:
+  update-seeds:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Scan for new sitting dates
+        run: python -m sgparl --update-seeds
+
+      - name: Commit refreshed seeds (only if changed)
+        run: |
+          if git diff --quiet -- seeds/dates.csv; then
+            echo "No new sitting dates found — nothing to commit."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add seeds/dates.csv
+          git commit -m "chore: update sitting-date seeds (automated)"
+          git push
